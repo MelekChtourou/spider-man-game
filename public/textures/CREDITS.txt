@@ -1,0 +1,8 @@
+Texture credits
+===============
+
+ground/asphalt_02_*.jpg
+  Source : Poly Haven — https://polyhaven.com/a/asphalt_02
+  License: CC0 (public domain). No attribution required, but credit given
+           here as a courtesy.
+  Files  : diff (albedo), nor_gl (OpenGL-style normal), rough.

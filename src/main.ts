@@ -113,10 +113,11 @@ shadowGen.shadowMaxZ = 200;
 shadowGen.depthClamp = true;
 shadowGen.autoCalcDepthBounds = true;
 
-// Casters. Instances inherit caster status from the source mesh — registering
-// the source registers all 143 buildings in one call.
+// Casters. Instances inherit caster status from their source mesh —
+// registering each source covers that source's batch of buildings in one
+// call.
 shadowGen.addShadowCaster(player.mesh);
-shadowGen.addShadowCaster(city.buildingSource);
+for (const src of city.buildingSources) shadowGen.addShadowCaster(src);
 
 // Debug exposure (harmless in production)
 (globalThis as unknown as { __game: unknown }).__game = {
