@@ -9,11 +9,28 @@ import {
 import type { Mesh, Scene } from "@babylonjs/core";
 import type { CharacterAssets } from "./assets";
 
+/** Trip intensity levels — 0 is normal, 3 is peak chaos. */
+export type Tier = 0 | 1 | 2 | 3;
+
 export interface Player {
   mesh: Mesh;
   aggregate: PhysicsAggregate;
-  /** State that other systems (like web.ts) mutate to coordinate behavior. */
-  state: { swinging: boolean };
+  /** State that other systems (web.ts, main.ts trippy controller) read & mutate. */
+  state: {
+    swinging: boolean;
+    /** Seconds spent continuously airborne. Resets to 0 on ground contact. */
+    airTime: number;
+    /** Best run this session — never decreases until reload. */
+    maxAirTime: number;
+    /** Current trip tier — derived from airTime, or locked to 3 in maxMode. */
+    tier: Tier;
+    /**
+     * OIIA MAX mode — locks tier to 3 and plays the remix once through to
+     * its end. Cannot be cancelled by landing; only the remix's `onended`
+     * (set up by web.ts) clears this flag.
+     */
+    maxMode: boolean;
+  };
   /**
    * Force-clears a key from the input set. Used by web.ts on swing-release
    * to consume the Space press, so player.ts doesn't *also* fire a regular
@@ -21,6 +38,26 @@ export interface Player {
    * one of the player's double-jumps).
    */
   consumeKey: (code: string) => void;
+  /**
+   * Refills the double-jump charge to full. Called by web.ts on every
+   * swing-release so the player always has two fresh mid-air jumps to
+   * spend, regardless of whether they used any before grabbing the rope.
+   */
+  refillJumps: () => void;
+}
+
+// Tier escalation thresholds (seconds of continuous airtime). The first
+// remix experience is gated at 10s — short jumps stay clean, only sustained
+// flight triggers the trip. Tier 2/3 follow as the trip deepens.
+const TIER_1_THRESHOLD = 10;
+const TIER_2_THRESHOLD = 18;
+const TIER_3_THRESHOLD = 28;
+
+function autoTierFromAirTime(t: number): Tier {
+  if (t < TIER_1_THRESHOLD) return 0;
+  if (t < TIER_2_THRESHOLD) return 1;
+  if (t < TIER_3_THRESHOLD) return 2;
+  return 3;
 }
 
 const MASS = 70;
@@ -30,7 +67,9 @@ const GROUND_PROBE = 1.3; // how far below the capsule we look for ground
 
 const AIR_IMPULSE = 13;   // N·s per frame — generous mid-air directional control
 const AIR_MAX_HORIZ = 14; // m/s soft cap so air control can't run away forever
-const SWING_IMPULSE = 4;  // N·s per frame for lateral input while swinging
+const SWING_IMPULSE = 1.8; // N·s per frame — light lateral nudge so the swing
+                           // arc stays mostly upright instead of getting whipped
+                           // hard sideways. Was 4 (too aggressive).
 const MAX_JUMPS = 2;      // ground-jump + one mid-air double-jump
 
 export function createPlayer(scene: Scene, character: CharacterAssets): Player {
@@ -64,16 +103,15 @@ export function createPlayer(scene: Scene, character: CharacterAssets): Player {
   const charRestY = -TARGET_HEIGHT / 2 - naturalMinY * scale;
   character.root.position = new Vector3(0, charRestY, 0);
 
-  // The first baked animation in the glTF is the OIIA cat's spin. We start
-  // it then pause immediately — the per-frame loop below toggles play/pause
-  // based on whether the player is mid-swing, so the cat dances *only* while
-  // swinging. If the file ships without animations, the procedural face-
-  // toward-velocity fallback kicks in instead.
+  // The first baked animation in the glTF is the OIIA cat's spin. We
+  // *always* leave it running and gate playback via speedRatio = 0 (frozen)
+  // vs 1 (live) — switching the ratio is sample-precise and avoids the
+  // play()/pause() pipeline restart cost that caused stutter.
   const animGroups = Object.values(character.animations);
   const playingAnim = animGroups.length > 0 ? animGroups[0] : null;
   if (playingAnim) {
     playingAnim.start(true);
-    playingAnim.pause();
+    playingAnim.speedRatio = 0;
   }
 
   // Track a quaternion we drive procedurally when no baked animation exists.
@@ -125,7 +163,13 @@ export function createPlayer(scene: Scene, character: CharacterAssets): Player {
     return !!hit?.hit;
   }
 
-  const state = { swinging: false };
+  const state: Player["state"] = {
+    swinging: false,
+    airTime: 0,
+    maxAirTime: 0,
+    tier: 0,
+    maxMode: false,
+  };
 
   // Jump bookkeeping. `jumpsRemaining` decrements with each press; resets to
   // MAX_JUMPS the moment the player touches ground again. `wasGrounded`
@@ -145,18 +189,29 @@ export function createPlayer(scene: Scene, character: CharacterAssets): Player {
     // Prevent any sneaky angular drift.
     aggregate.body.setAngularVelocity(Vector3.Zero());
 
+    // Hoisted per-frame state: shared by the dance toggle, jump refill,
+    // air-time tracking, mode dispatch, and the character-alive pass.
+    // One ground raycast + one velocity read per frame.
+    const grounded = isGrounded();
+    const v = aggregate.body.getLinearVelocity();
+    const horizSq = v.x * v.x + v.z * v.z;
+
     // ---- OIIA dance toggle ----
-    // Cat spins only while swinging. play()/pause() are no-ops if already in
-    // the requested state, so we can call them every frame without restarting
-    // the animation.
+    // Cat spins while swinging-with-motion or while airborne; freezes &
+    // resets to frame 0 when grounded-and-still. speedRatio toggle avoids
+    // the play()/pause() pipeline hitch.
     if (playingAnim) {
-      if (state.swinging && !playingAnim.isPlaying) playingAnim.play(true);
-      else if (!state.swinging && playingAnim.isPlaying) playingAnim.pause();
+      const wantSpin =
+        !grounded || (state.swinging && horizSq > FACE_MIN_SPEED_SQ);
+      if (wantSpin) {
+        if (playingAnim.speedRatio !== 1) playingAnim.speedRatio = 1;
+      } else if (playingAnim.speedRatio !== 0) {
+        playingAnim.speedRatio = 0;
+        playingAnim.goToFrame(playingAnim.from);
+      }
     }
 
     // ---- Character "alive" pass (independent of input mode) ----
-    const v = aggregate.body.getLinearVelocity();
-    const horizSq = v.x * v.x + v.z * v.z;
     // Procedural face-toward-velocity only when no baked animation owns the
     // rotation channel — otherwise we'd fight (e.g. cancel) the OIIA cat's
     // spin animation each frame.
@@ -209,10 +264,25 @@ export function createPlayer(scene: Scene, character: CharacterAssets): Player {
       return;
     }
 
-    const grounded = isGrounded();
     // Refill jumps the moment we touch ground (rising-edge detection).
     if (grounded && !wasGrounded) jumpsRemaining = MAX_JUMPS;
     wasGrounded = grounded;
+
+    // ---- Air-time tracking + tier resolution ----
+    // Counts as "airtime" when: (a) genuinely airborne, OR (b) swinging
+    // *with motion* — so a player skimming the ground on a long pendulum
+    // arc doesn't get their counter reset by every brief touch.
+    const dtSec = scene.getEngine().getDeltaTime() / 1000;
+    const swingingWithMotion = state.swinging && horizSq > FACE_MIN_SPEED_SQ;
+    if (!grounded || swingingWithMotion) {
+      state.airTime += dtSec;
+      if (state.airTime > state.maxAirTime) state.maxAirTime = state.airTime;
+    } else {
+      state.airTime = 0;
+    }
+    // Resolve final tier: maxMode locks to 3 (regardless of grounded state)
+    // until the remix finishes; otherwise derive from accumulated airtime.
+    state.tier = state.maxMode ? 3 : autoTierFromAirTime(state.airTime);
 
     // Universal jump (works grounded and mid-air for the double-jump). One
     // press = one jump consumed; counter refills on landing. Each jump
@@ -276,5 +346,8 @@ export function createPlayer(scene: Scene, character: CharacterAssets): Player {
     aggregate,
     state,
     consumeKey: (code: string) => keys.delete(code),
+    refillJumps: () => {
+      jumpsRemaining = MAX_JUMPS;
+    },
   };
 }

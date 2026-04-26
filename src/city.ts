@@ -9,12 +9,12 @@ import {
 import type { Scene } from "@babylonjs/core";
 import type { BuildingSource } from "./assets";
 
-const GRID = 12; // 12 x 12 = 144 building cells (center skipped → 143)
-const CELL = 32; // distance between building centers — wide streets for swinging
-const FOOTPRINT_TARGET = 14; // building base width — leaves ~18u of road in each cell
-const HEIGHT_MIN = 25; // shortest building (world units)
-const HEIGHT_MAX = 70; // tallest skyscraper — taller arc for swing-jumps
-const GROUND_SIZE = 500; // accommodates the larger 12×32 = 384u city span
+const GRID = 20; // 20 x 20 = 400 building cells (center skipped → 399)
+const CELL = 34; // distance between building centers — wide streets for swinging
+const FOOTPRINT_TARGET = 14; // building base width — leaves ~20u of road in each cell
+const HEIGHT_MIN = 28; // shortest building (world units)
+const HEIGHT_MAX = 85; // tallest skyscraper — taller arc for swing-jumps
+const GROUND_SIZE = 800; // accommodates the larger 20×34 = 680u city span
 
 export function createCity(scene: Scene, sources: BuildingSource[]): void {
   // ---- Ground ----

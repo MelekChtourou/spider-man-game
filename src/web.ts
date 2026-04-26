@@ -16,7 +16,7 @@ import type {
 import type { Player } from "./player";
 import { vibrate } from "./platform";
 
-const MAX_RANGE = 200;     // how far each hand reaches for an anchor (m)
+const MAX_RANGE = 400;     // how far each hand reaches for an anchor (m)
 const ROPE_SLACK = 0.95;   // attach slightly tighter than current distance for a "yank" feel
 
 // Release-jump: pressing Space while swinging detaches the rope and adds a
@@ -56,40 +56,120 @@ export function createWebSwing(
   webMat.specularColor = Color3.Black();
   webMat.freeze();
 
-  // OIIA-OIIA cat soundtrack via plain HTMLAudioElement. Babylon 9's audio
-  // engine is opt-in and ships uninitialized by default, so we sidestep it
-  // entirely. We play the first 2 seconds (≈ "o-i-i-a-i"), and a setTimeout
-  // re-rewinds + replays while the rope is still attached.
-  const OIIA_CHUNK_MS = 2000;
-  const oiiaAudio = new Audio("/assets/oiia-oiia-sound.mp3");
-  oiiaAudio.preload = "auto";
-  oiiaAudio.volume = 0.8;
-  let oiiaLoopTimer: number | null = null;
-  function startOiia(): void {
-    if (oiiaLoopTimer !== null) clearTimeout(oiiaLoopTimer);
-    oiiaAudio.currentTime = 0;
-    // play() returns a Promise that rejects if autoplay is blocked. We
-    // swallow the rejection — the user gesture (J/L key) almost always
-    // unblocks audio, but if it doesn't on some browser, we fail silently.
-    void oiiaAudio.play().catch(() => {});
-    oiiaLoopTimer = window.setTimeout(function tick() {
-      if (player.state.swinging) {
-        oiiaAudio.currentTime = 0;
-        void oiiaAudio.play().catch(() => {});
-        oiiaLoopTimer = window.setTimeout(tick, OIIA_CHUNK_MS);
-      } else {
-        oiiaLoopTimer = null;
-      }
-    }, OIIA_CHUNK_MS);
-  }
-  function stopOiia(): void {
-    if (oiiaLoopTimer !== null) {
-      clearTimeout(oiiaLoopTimer);
-      oiiaLoopTimer = null;
+  // OIIA soundtrack via Web Audio API: pre-decoded AudioBuffers +
+  // AudioBufferSourceNode = sample-accurate playback with no decode delay
+  // when tier transitions need to seek to a new section.
+  //
+  // Two tracks are pre-decoded: the standard "o-i-i-a-i" chunk (looped over
+  // its first 2s while airborne with no trip — Tier 0), and the OIIA REMIX
+  // (Tiers 1–3 each play it from a different seek offset that lines up with
+  // a musical section: intro / drop / peak).
+  const OIIA_LOOP_END = 2;
+  // Tier → seek offset into the remix (seconds). Found via RMS analysis of
+  // oiiai remix.mp3: drop hits at ~26s, peak section at ~73s.
+  const TIER_SEEK_OFFSETS = [0, 0, 26, 73];
+
+  const audioCtx = new (window.AudioContext ||
+    (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
+  const masterGain = audioCtx.createGain();
+  masterGain.gain.value = 0.8;
+  masterGain.connect(audioCtx.destination);
+
+  let oiiaBuffer: AudioBuffer | null = null;
+  let remixBuffer: AudioBuffer | null = null;
+  let currentSource: AudioBufferSourceNode | null = null;
+  // Mode the audio router is currently in. Distinct from player.state.tier
+  // because (a) we only restart the source on actual transitions, and (b)
+  // "max" mode is a special non-looping case for OIIA MAX.
+  //   "off" / "t0" / "t1" / "t2" / "t3" / "max"
+  let playingMode: "off" | "t0" | "t1" | "t2" | "t3" | "max" = "off";
+
+  const decode = (path: string) =>
+    fetch(path)
+      .then((r) => r.arrayBuffer())
+      .then((buf) => audioCtx.decodeAudioData(buf))
+      .catch(() => null);
+
+  void decode("/assets/oiia-oiia-sound.mp3").then((b) => { oiiaBuffer = b; });
+  void decode("/assets/oiiai remix.mp3").then((b) => { remixBuffer = b; });
+
+  function playTier(tier: 0 | 1 | 2 | 3): void {
+    const buffer = tier === 0 ? oiiaBuffer : remixBuffer;
+    if (!buffer) return;
+    if (audioCtx.state === "suspended") void audioCtx.resume();
+    if (currentSource) {
+      try { currentSource.stop(); } catch { /* already stopped */ }
     }
-    oiiaAudio.pause();
-    oiiaAudio.currentTime = 0;
+    const src = audioCtx.createBufferSource();
+    src.buffer = buffer;
+    src.loop = true;
+    if (tier === 0) {
+      src.loopStart = 0;
+      src.loopEnd = OIIA_LOOP_END;
+    }
+    // Tier 1-3 loop the whole remix; their start *offset* picks the section.
+    src.connect(masterGain);
+    src.start(0, TIER_SEEK_OFFSETS[tier]);
+    currentSource = src;
+    playingMode = (tier === 0 ? "t0" : tier === 1 ? "t1" : tier === 2 ? "t2" : "t3");
   }
+
+  function startMaxMode(): void {
+    if (!remixBuffer) return;
+    if (audioCtx.state === "suspended") void audioCtx.resume();
+    if (currentSource) {
+      try { currentSource.stop(); } catch { /* already stopped */ }
+    }
+    const src = audioCtx.createBufferSource();
+    src.buffer = remixBuffer;
+    src.loop = false; // play the full track *once* — that's the whole point
+    // When the buffer ends naturally, drop maxMode so the player is freed.
+    // Stopping early via .stop() also fires onended, so we guard against
+    // it firing twice by checking currentSource identity before clearing.
+    src.onended = () => {
+      if (currentSource === src) {
+        currentSource = null;
+        playingMode = "off";
+      }
+      player.state.maxMode = false;
+    };
+    src.connect(masterGain);
+    src.start(); // from t=0 — full song, no seek
+    currentSource = src;
+    playingMode = "max";
+  }
+
+  function stopAudio(): void {
+    if (currentSource) {
+      try { currentSource.stop(); } catch { /* already stopped */ }
+      currentSource = null;
+    }
+    playingMode = "off";
+  }
+
+  // Per-frame audio routing.
+  //   maxMode true → "max" (full remix, single play, can't be interrupted)
+  //   Tier 0, grounded → silence
+  //   Tier 0, airborne → standard OIIA chunk loop
+  //   Tier 1/2/3 → remix from corresponding seek offset, looped
+  scene.onBeforeRenderObservable.add(() => {
+    if (player.state.maxMode) {
+      if (playingMode !== "max") startMaxMode();
+      return;
+    }
+    const tier = player.state.tier;
+    const airborneOrMoving = player.state.airTime > 0;
+    const desired: typeof playingMode =
+      tier > 0
+        ? (`t${tier}` as "t1" | "t2" | "t3")
+        : airborneOrMoving
+        ? "t0"
+        : "off";
+    if (desired !== playingMode) {
+      if (desired === "off") stopAudio();
+      else playTier(tier as 0 | 1 | 2 | 3);
+    }
+  });
 
   function rayDirForHand(hand: Hand): Vector3 {
     let forward = camera.getForwardRay().direction.clone();
@@ -151,9 +231,7 @@ export function createWebSwing(
     // Sharp tactile "thwip" — the rope catching is the most satisfying
     // moment of the swing loop, so we give it the strongest haptic cue.
     vibrate(20);
-    // Restart the OIIA chunk from the beginning — every swing-start should
-    // hit "o-i-i-a-i" cleanly from the top, not resume mid-syllable.
-    startOiia();
+    // Audio routing happens in the per-frame observer above.
   }
 
   function endSwing(): void {
@@ -175,8 +253,8 @@ export function createWebSwing(
     }
     activeHand = null;
     player.state.swinging = false;
-    // Cut the music when the rope detaches.
-    stopOiia();
+    // Audio routing happens in the per-frame observer; if the player is
+    // still airborne or in a forced tier, music keeps playing until landing.
   }
 
   // ---- Keyboard: J = left hand, L = right hand. Bound by physical position ----
@@ -200,6 +278,10 @@ export function createWebSwing(
       // jump handler doesn't also fire on this same press — that was both
       // overriding the release boost AND eating a double-jump charge.
       player.consumeKey("Space");
+      // Hand the player two fresh mid-air jumps after every release so a
+      // "ground-jump → swing → release → double-jump" chain always has
+      // the full double-jump budget.
+      player.refillJumps();
       e.preventDefault();
       e.stopImmediatePropagation();
       vibrate(15);
