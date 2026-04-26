@@ -1,11 +1,11 @@
 import {
   Color3,
   MeshBuilder,
+  PBRMaterial,
   PhysicsAggregate,
   PhysicsShapeType,
   Quaternion,
   Ray,
-  StandardMaterial,
   Vector3,
 } from "@babylonjs/core";
 import type { Mesh, Scene } from "@babylonjs/core";
@@ -36,9 +36,12 @@ export function createPlayer(scene: Scene): Player {
   capsule.rotationQuaternion = Quaternion.Identity();
   capsule.isPickable = false; // never let raycasts hit ourselves
 
-  const mat = new StandardMaterial("playerMat", scene);
-  mat.diffuseColor = new Color3(0.85, 0.13, 0.18); // Spider-Man red
-  mat.specularColor = Color3.Black();
+  // PBR so the capsule picks up sun + IBL like everything else. A touch of
+  // metallic + low-ish roughness gives the iconic suit-fabric sheen.
+  const mat = new PBRMaterial("playerMat", scene);
+  mat.albedoColor = new Color3(0.85, 0.13, 0.18); // Spider-Man red
+  mat.metallic = 0.05;
+  mat.roughness = 0.55;
   capsule.material = mat;
 
   // Physics body

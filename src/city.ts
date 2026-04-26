@@ -1,12 +1,12 @@
 import {
   Color3,
   MeshBuilder,
+  PBRMaterial,
   PhysicsAggregate,
   PhysicsShapeType,
-  StandardMaterial,
   Vector3,
 } from "@babylonjs/core";
-import type { Scene } from "@babylonjs/core";
+import type { Mesh, Scene } from "@babylonjs/core";
 
 const GRID = 12;        // 12 x 12 = 144 buildings
 const CELL = 18;        // distance between building centers
@@ -15,28 +15,36 @@ const MIN_H = 15;
 const MAX_H = 65;
 const GROUND_SIZE = 400;
 
-export function createCity(scene: Scene): void {
-  // ---- Ground ----
+/** Returned so main.ts can register them as shadow casters / receivers. */
+export interface City {
+  ground: Mesh;
+  buildingSource: Mesh;
+}
+
+export function createCity(scene: Scene): City {
+  // ---- Ground (PBR, shadow receiver) ----
   const ground = MeshBuilder.CreateGround(
     "ground",
     { width: GROUND_SIZE, height: GROUND_SIZE },
     scene,
   );
-  const groundMat = new StandardMaterial("groundMat", scene);
-  groundMat.diffuseColor = new Color3(0.16, 0.16, 0.18);
-  groundMat.specularColor = Color3.Black();
+  const groundMat = new PBRMaterial("groundMat", scene);
+  groundMat.albedoColor = new Color3(0.16, 0.16, 0.18);
+  groundMat.metallic = 0.0;
+  groundMat.roughness = 0.9;
   ground.material = groundMat;
   ground.metadata = { kind: "ground" };
+  ground.receiveShadows = true;
   new PhysicsAggregate(ground, PhysicsShapeType.BOX, { mass: 0 }, scene);
 
-  // ---- Buildings: one source mesh + one shared material + N instances ----
-  // Before this commit each building had its own Mesh and StandardMaterial,
-  // which meant ~144 draw calls and 144 unique GPU programs. Instancing
-  // collapses rendering to a single draw call (or a couple, after culling
-  // partitions) by reusing one VBO with per-instance world matrices.
-  const sharedMat = new StandardMaterial("buildingMat", scene);
-  sharedMat.diffuseColor = new Color3(0.45, 0.45, 0.48);
-  sharedMat.specularColor = Color3.Black();
+  // ---- Buildings: one source mesh + one shared PBR material + N instances ----
+  // Single VBO via instancing collapses ~150 draw calls into ~3. PBR replaces
+  // the previous StandardMaterial so building surfaces respond physically to
+  // the new sun + IBL environment.
+  const sharedMat = new PBRMaterial("buildingMat", scene);
+  sharedMat.albedoColor = new Color3(0.45, 0.45, 0.48);
+  sharedMat.metallic = 0.0;
+  sharedMat.roughness = 0.7;
   // Lock the material once so Babylon can skip re-uploading uniforms per
   // draw — small but real win on mobile GPUs.
   sharedMat.freeze();
@@ -48,9 +56,8 @@ export function createCity(scene: Scene): void {
   );
   source.material = sharedMat;
   source.metadata = { kind: "building" };
-  // The source itself is invisible — only its instances render. We can't
-  // simply hide it (would hide all instances too); placing it far below the
-  // map keeps it out of frame without that side-effect.
+  source.receiveShadows = true;
+  // Keep the source itself off-screen — only its instances render.
   source.position.y = -10000;
 
   const origin = -((GRID - 1) * CELL) / 2;
@@ -68,10 +75,12 @@ export function createCity(scene: Scene): void {
       inst.position = new Vector3(x, height / 2, z);
       inst.scaling = new Vector3(BUILDING_W, height, BUILDING_W);
       inst.metadata = { kind: "building" };
+      // Instances inherit `receiveShadows` from the source — no per-instance
+      // toggle needed.
 
-      // Static physics body. The aggregate reads the instance's scaled
-      // bounds, so each building gets a correctly-sized box collider.
       new PhysicsAggregate(inst, PhysicsShapeType.BOX, { mass: 0 }, scene);
     }
   }
+
+  return { ground, buildingSource: source };
 }

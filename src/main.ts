@@ -1,6 +1,10 @@
 import HavokPhysics from "@babylonjs/havok";
 import {
+  CascadedShadowGenerator,
+  Color3,
   Color4,
+  CubeTexture,
+  DirectionalLight,
   Engine,
   HavokPlugin,
   HemisphericLight,
@@ -14,6 +18,7 @@ import { createCamera } from "./camera";
 import { createWebSwing } from "./web";
 import { setupTouchControls } from "./touch";
 import { setupPlatform } from "./platform";
+import { setupRenderPipelines } from "./render";
 
 const canvas = document.getElementById("game") as HTMLCanvasElement;
 
@@ -24,10 +29,8 @@ const engine = new Engine(canvas, true, {
 });
 
 // Render-resolution scaling. Phones/tablets often expose devicePixelRatio of
-// 2-3, which means rendering at native res chews through fragment shaders for
-// little visible gain on a small screen. Render at ~67% on mobile and let the
-// browser scale up — typically doubles framerate with negligible visual cost.
-// Desktop with a hi-DPI display still benefits from a milder scale-down.
+// 2-3; we render at 67% on coarse-pointer devices and let the browser scale up.
+// `isMobile` also drives quality decisions later (shadows, SSAO).
 const isMobile = window.matchMedia("(pointer: coarse)").matches;
 if (isMobile) {
   engine.setHardwareScalingLevel(1.5);
@@ -36,41 +39,100 @@ if (isMobile) {
 }
 
 const scene = new Scene(engine);
+// Fallback color while the .env streams in. Once env loads, the skybox
+// covers this entirely.
 scene.clearColor = new Color4(0.55, 0.7, 0.95, 1);
+// Cool ambient tint feeds into PBR materials' indirect light.
+scene.ambientColor = new Color3(0.3, 0.35, 0.45);
 
-new HemisphericLight("hemi", new Vector3(0, 1, 0.2), scene);
+// ---- Lights ----------------------------------------------------------------
+// Sun: warm, slight low-angle direction. The dominant key light and the only
+// shadow caster — Babylon's CascadedShadowGenerator is built around a single
+// DirectionalLight.
+const sun = new DirectionalLight("sun", new Vector3(-0.5, -1, -0.3), scene);
+sun.intensity = 1.4;
+sun.diffuse = new Color3(1.0, 0.95, 0.85);
+// Position the light source above-and-out so the shadow frustum has good
+// coverage of the play area.
+sun.position = new Vector3(60, 120, 40);
 
-// Init Havok. The locateFile workaround is required under Vite — the WASM
-// is copied into /public so it's served at /HavokPhysics.wasm.
+// Fill: cool hemispherical light at low intensity. Keeps shadow valleys from
+// going pitch-black; the sky-blue tint complements the warm sun.
+const hemi = new HemisphericLight("hemi", new Vector3(0, 1, 0), scene);
+hemi.intensity = 0.3;
+hemi.diffuse = new Color3(0.85, 0.85, 0.95);
+hemi.groundColor = new Color3(0.45, 0.5, 0.55);
+
+// ---- IBL environment + skybox ----------------------------------------------
+// One-call setup: a single .env (pre-filtered cubemap) gives us both the
+// visible sky AND image-based lighting that feeds reflections on every PBR
+// material in the scene. Without IBL, PBR surfaces look unnaturally flat.
+const envTex = CubeTexture.CreateFromPrefilteredData(
+  "/env/environment.env",
+  scene,
+);
+scene.environmentTexture = envTex;
+// IBL contribution. Default 1.0 has the env light competing with the sun;
+// 0.4 keeps the sun as the dominant key light while still feeding good
+// reflections on PBR materials.
+scene.environmentIntensity = 0.4;
+// pbr=true, size=1000, blur=0.6 → softly-blurred sky avoids competing with
+// the city detail.
+scene.createDefaultSkybox(envTex, true, 1000, 0.6);
+
+// ---- Physics (Havok) -------------------------------------------------------
 const havok = await HavokPhysics({
   locateFile: (file: string) =>
     file.endsWith(".wasm") ? "/HavokPhysics.wasm" : file,
 });
 scene.enablePhysics(new Vector3(0, -9.81, 0), new HavokPlugin(true, havok));
 
-createCity(scene);
+// ---- World -----------------------------------------------------------------
+const city = createCity(scene);
 const player = createPlayer(scene);
 const camera = createCamera(scene, player, canvas);
 createWebSwing(scene, player, camera);
-// No-op on devices without touch; otherwise builds the joystick + buttons UI.
 setupTouchControls(camera);
-// PWA service worker, fullscreen on first gesture, orientation lock,
-// screen wake lock. Each step degrades gracefully if unsupported.
 setupPlatform();
 
-// Debug exposure (harmless in production; remove later if desired)
+// ---- Cinematic post-processing (camera must exist first) -------------------
+setupRenderPipelines(scene, camera, isMobile ? "low" : "high");
+
+// ---- Cascaded shadow maps --------------------------------------------------
+// 4 cascades cover the play area at varying resolutions: tightest near the
+// camera, loosest far away. PCF gives soft penumbras. Mobile downgrades to
+// fewer cascades and a smaller map for perf.
+const SHADOW_MAP_SIZE = isMobile ? 512 : 1024;
+const shadowGen = new CascadedShadowGenerator(SHADOW_MAP_SIZE, sun);
+shadowGen.numCascades = isMobile ? 2 : 4;
+shadowGen.lambda = 0.7;                  // logarithmic-vs-uniform split blend
+shadowGen.cascadeBlendPercentage = 0.05; // hide cascade seams
+shadowGen.usePercentageCloserFiltering = true;
+shadowGen.filteringQuality = isMobile ? 0 : 1; // 0=low, 1=medium, 2=high
+shadowGen.shadowMaxZ = 200;
+shadowGen.depthClamp = true;
+shadowGen.autoCalcDepthBounds = true;
+
+// Casters. Instances inherit caster status from the source mesh — registering
+// the source registers all 143 buildings in one call.
+shadowGen.addShadowCaster(player.mesh);
+shadowGen.addShadowCaster(city.buildingSource);
+
+// Debug exposure (harmless in production)
 (globalThis as unknown as { __game: unknown }).__game = {
   engine,
   scene,
   player,
   camera,
+  sun,
+  shadowGen,
 };
 
-// Drive the physics step explicitly each frame. We can't rely on the
-// side-effect physicsEngineComponent because (a) tree-shaken builds can drop it,
-// and (b) under Vite's optimizeDeps.exclude the module identity can differ from
-// what `Scene.enablePhysics` looks for. We use our own performance.now() clock
-// so the step works the same whether driven by rAF or scene.render() directly.
+// ---- Physics step driver ---------------------------------------------------
+// We can't rely on the side-effect physicsEngineComponent because Vite's
+// optimizeDeps.exclude breaks the module-identity match Scene.enablePhysics
+// uses. Drive _step(dt) ourselves, with a performance.now() clock so it
+// works whether driven by rAF or scene.render() directly.
 const physicsEngine = scene.getPhysicsEngine();
 let prevTime = performance.now();
 scene.onBeforeRenderObservable.add(() => {
