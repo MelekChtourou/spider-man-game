@@ -14,6 +14,7 @@ import type {
   Scene,
 } from "@babylonjs/core";
 import type { Player } from "./player";
+import { vibrate } from "./platform";
 
 const MAX_RANGE = 200;     // how far each hand reaches for an anchor (m)
 const ROPE_SLACK = 0.95;   // attach slightly tighter than current distance for a "yank" feel
@@ -96,6 +97,9 @@ export function createWebSwing(
 
     activeHand = hand;
     player.state.swinging = true;
+    // Sharp tactile "thwip" — the rope catching is the most satisfying
+    // moment of the swing loop, so we give it the strongest haptic cue.
+    vibrate(20);
   }
 
   function endSwing(): void {

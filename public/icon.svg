@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" fill="#d92638"/>
+  <g stroke="#fff" stroke-width="8" fill="none" stroke-linecap="round">
+    <!-- Spider-web radial -->
+    <line x1="256" y1="32" x2="256" y2="480"/>
+    <line x1="32" y1="256" x2="480" y2="256"/>
+    <line x1="98" y1="98" x2="414" y2="414"/>
+    <line x1="414" y1="98" x2="98" y2="414"/>
+    <!-- Concentric arcs -->
+    <circle cx="256" cy="256" r="64"/>
+    <circle cx="256" cy="256" r="128"/>
+    <circle cx="256" cy="256" r="192"/>
+  </g>
+</svg>

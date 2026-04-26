@@ -13,6 +13,7 @@ import { createPlayer } from "./player";
 import { createCamera } from "./camera";
 import { createWebSwing } from "./web";
 import { setupTouchControls } from "./touch";
+import { setupPlatform } from "./platform";
 
 const canvas = document.getElementById("game") as HTMLCanvasElement;
 
@@ -53,6 +54,9 @@ const camera = createCamera(scene, player, canvas);
 createWebSwing(scene, player, camera);
 // No-op on devices without touch; otherwise builds the joystick + buttons UI.
 setupTouchControls(camera);
+// PWA service worker, fullscreen on first gesture, orientation lock,
+// screen wake lock. Each step degrades gracefully if unsupported.
+setupPlatform();
 
 // Debug exposure (harmless in production; remove later if desired)
 (globalThis as unknown as { __game: unknown }).__game = {
