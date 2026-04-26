@@ -22,6 +22,18 @@ const engine = new Engine(canvas, true, {
   disableWebGL2Support: false,
 });
 
+// Render-resolution scaling. Phones/tablets often expose devicePixelRatio of
+// 2-3, which means rendering at native res chews through fragment shaders for
+// little visible gain on a small screen. Render at ~67% on mobile and let the
+// browser scale up — typically doubles framerate with negligible visual cost.
+// Desktop with a hi-DPI display still benefits from a milder scale-down.
+const isMobile = window.matchMedia("(pointer: coarse)").matches;
+if (isMobile) {
+  engine.setHardwareScalingLevel(1.5);
+} else if (window.devicePixelRatio > 1.5) {
+  engine.setHardwareScalingLevel(1.25);
+}
+
 const scene = new Scene(engine);
 scene.clearColor = new Color4(0.55, 0.7, 0.95, 1);
 
