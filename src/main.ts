@@ -36,7 +36,7 @@ scene.enablePhysics(new Vector3(0, -9.81, 0), new HavokPlugin(true, havok));
 
 createCity(scene);
 const player = createPlayer(scene);
-const camera = createCamera(scene, player.mesh, canvas);
+const camera = createCamera(scene, player, canvas);
 createWebSwing(scene, player, camera);
 
 // Debug exposure (harmless in production; remove later if desired)
