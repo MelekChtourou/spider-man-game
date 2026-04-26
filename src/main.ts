@@ -12,6 +12,7 @@ import { createCity } from "./city";
 import { createPlayer } from "./player";
 import { createCamera } from "./camera";
 import { createWebSwing } from "./web";
+import { setupTouchControls } from "./touch";
 
 const canvas = document.getElementById("game") as HTMLCanvasElement;
 
@@ -38,6 +39,8 @@ createCity(scene);
 const player = createPlayer(scene);
 const camera = createCamera(scene, player, canvas);
 createWebSwing(scene, player, camera);
+// No-op on devices without touch; otherwise builds the joystick + buttons UI.
+setupTouchControls(camera);
 
 // Debug exposure (harmless in production; remove later if desired)
 (globalThis as unknown as { __game: unknown }).__game = {

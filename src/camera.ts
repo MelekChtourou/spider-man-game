@@ -2,6 +2,14 @@ import { ArcRotateCamera, Ray, Vector3 } from "@babylonjs/core";
 import type { Scene } from "@babylonjs/core";
 import type { Player } from "./player";
 
+/** Camera with a manual-override hook so touch drag can temporarily pause
+ *  Look-Where-You're-Going while the user is steering by hand. */
+export interface FollowCamera extends ArcRotateCamera {
+  /** Suspend automatic heading alignment for `ms` milliseconds from now.
+   *  Used by the touch input layer while the user is dragging the camera. */
+  suppressAutoAlign: (ms: number) => void;
+}
+
 // ----------------------------------------------------------------------------
 // Autonomous camera. No mouse needed — the camera infers intent from the
 // player's velocity (Look-Where-You're-Going), widens FOV under speed, and
@@ -37,7 +45,7 @@ export function createCamera(
   scene: Scene,
   player: Player,
   _canvas: HTMLCanvasElement,
-): ArcRotateCamera {
+): FollowCamera {
   const camera = new ArcRotateCamera(
     "camera",
     -Math.PI / 2,
@@ -45,12 +53,17 @@ export function createCamera(
     RADIUS_DEFAULT,
     player.mesh.position.clone(),
     scene,
-  );
+  ) as FollowCamera;
   // NOTE: deliberately NOT calling attachControl — this camera ignores the
   // mouse and wheel. Players keep both hands on the keyboard.
   camera.lowerBetaLimit = 0.15;
   camera.upperBetaLimit = Math.PI / 2 - 0.05;
   camera.fov = FOV_REST;
+
+  let autoAlignSuppressedUntil = 0;
+  camera.suppressAutoAlign = (ms: number) => {
+    autoAlignSuppressedUntil = performance.now() + ms;
+  };
 
   // Shortest-path delta for angle interpolation (handles ±π wraparound).
   const wrapDelta = (from: number, to: number): number => {
@@ -80,7 +93,7 @@ export function createCamera(
     const horizSpeed = Math.hypot(v.x, v.z);
 
     // ---- 1. Look-Where-You're-Going ---------------------------------------
-    if (horizSpeed > MIN_SPEED_TO_ALIGN) {
+    if (horizSpeed > MIN_SPEED_TO_ALIGN && now >= autoAlignSuppressedUntil) {
       // Camera should sit BEHIND the player along the velocity vector. With
       // ArcRotateCamera's parametrization, the camera offset from target is
       //   (cos α · sin β, cos β, sin α · sin β)
