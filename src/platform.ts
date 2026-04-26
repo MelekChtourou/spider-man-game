@@ -1,9 +1,11 @@
 /**
  * Platform-integration glue: PWA service worker, fullscreen, orientation
- * lock, screen wake lock, and haptic feedback. Each call is opportunistic —
- * if the platform doesn't support a feature, we silently skip rather than
- * throw, so this module is safe to invoke unconditionally.
+ * lock, screen wake lock, haptic feedback, and audio unlock. Each call is
+ * opportunistic — if the platform doesn't support a feature, we silently
+ * skip rather than throw, so this module is safe to invoke unconditionally.
  */
+
+import { unlockAudio } from "./audio";
 
 // ---- Haptics --------------------------------------------------------------
 // Exported so other modules (web.ts, player.ts) can request a buzz on
@@ -59,6 +61,9 @@ function setupFullscreenOnFirstGesture(): void {
   };
   const once = () => {
     tryEnterFullscreen();
+    // Browsers block AudioContext.resume() until a user gesture; this is the
+    // earliest moment we're allowed to start playing sound.
+    unlockAudio();
     document.removeEventListener("pointerdown", once);
     document.removeEventListener("keydown", once);
   };

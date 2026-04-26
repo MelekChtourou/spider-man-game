@@ -9,6 +9,7 @@ import {
   Vector3,
 } from "@babylonjs/core";
 import type { Mesh, Scene } from "@babylonjs/core";
+import { playLanding, setWindIntensity } from "./audio";
 
 export interface Player {
   mesh: Mesh;
@@ -87,6 +88,9 @@ export function createPlayer(scene: Scene): Player {
 
   const state = { swinging: false };
 
+  // Track airborne edges so we only play the landing thud once on touchdown.
+  let wasGroundedLastFrame = false;
+
   // ---- Per-frame update ----
   scene.onBeforeRenderObservable.add(() => {
     // Prevent any sneaky angular drift.
@@ -101,6 +105,11 @@ export function createPlayer(scene: Scene): Player {
     if (forward.lengthSquared() < 1e-6) forward = new Vector3(0, 0, 1);
     forward.normalize();
     const right = Vector3.Cross(Vector3.Up(), forward).normalize();
+
+    // ---- Audio modulation: wind ramps with horizontal speed ---------------
+    const lv = aggregate.body.getLinearVelocity();
+    const horizSpeed = Math.hypot(lv.x, lv.z);
+    setWindIntensity(Math.min(horizSpeed / 25, 1));
 
     // ---- Mode 1: swinging — only lateral input (D/Q) as light impulse, ----
     // ---- never override velocity (would kill the pendulum motion).      ----
@@ -121,6 +130,15 @@ export function createPlayer(scene: Scene): Player {
     }
 
     const grounded = isGrounded();
+
+    // Edge detect airborne → grounded for the landing thud. Skip the very
+    // first frame after spawn (capsule starts at y=5 → wasGroundedLastFrame
+    // is false and the next frame would mis-fire as a "landing") by gating
+    // on a downward-velocity threshold, which a fresh-spawn always has.
+    if (grounded && !wasGroundedLastFrame && lv.y < -1) {
+      playLanding();
+    }
+    wasGroundedLastFrame = grounded;
 
     // ---- Mode 2: walking on the ground — direct velocity control. ----
     if (grounded) {
