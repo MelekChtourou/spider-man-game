@@ -25,6 +25,7 @@ const GROUND_PROBE = 1.3; // how far below the capsule we look for ground
 
 const AIR_IMPULSE = 3;    // N·s per frame for air control while not swinging
 const SWING_IMPULSE = 4;  // N·s per frame for lateral input while swinging
+const AIR_DRAG = 0.992;   // per-frame multiplier on horizontal velocity in air
 
 export function createPlayer(scene: Scene): Player {
   // Capsule mesh
@@ -166,6 +167,11 @@ export function createPlayer(scene: Scene): Player {
     // ---- Mode 3: airborne, not swinging — preserve momentum, weak control ----
     // This is what makes releasing a swing feel like a fling: gravity + the
     // velocity you had at release stay intact, and WASD can still nudge you.
+    // We add a gentle horizontal drag so freelancing through the air doesn't
+    // glide forever — matches air-resistance intuition.
+    aggregate.body.setLinearVelocity(
+      new Vector3(lv.x * AIR_DRAG, lv.y, lv.z * AIR_DRAG),
+    );
     const dir = Vector3.Zero();
     if (pressed("KeyW", "ArrowUp")) dir.addInPlace(forward);
     if (pressed("KeyS", "ArrowDown")) dir.subtractInPlace(forward);

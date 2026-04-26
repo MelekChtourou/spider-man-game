@@ -141,7 +141,10 @@ scene.onBeforeRenderObservable.add(() => {
   const dtSec = (now - prevTime) / 1000;
   prevTime = now;
   // Clamp dt so a stalled tab doesn't cause a giant physics jump on resume.
-  const stepDt = Math.min(Math.max(dtSec, 0), 1 / 30);
+  // Multiply by scene.animationTimeScale so things like the brief slow-mo
+  // on rope catch (web.ts) actually slow the physics, not just animations.
+  const stepDt =
+    Math.min(Math.max(dtSec, 0), 1 / 30) * scene.animationTimeScale;
   if (stepDt > 0 && physicsEngine) {
     physicsEngine._step(stepDt);
   }
