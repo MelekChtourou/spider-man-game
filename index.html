@@ -54,6 +54,20 @@
         pointer-events: none;
         mix-blend-mode: difference;
       }
+      #fps {
+        position: fixed;
+        top: calc(env(safe-area-inset-top, 0px) + 12px);
+        right: calc(env(safe-area-inset-right, 0px) + 12px);
+        color: white;
+        background: rgba(0, 0, 0, 0.45);
+        padding: 4px 8px;
+        border-radius: 4px;
+        font: 600 13px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+        pointer-events: none;
+        mix-blend-mode: difference;
+        font-variant-numeric: tabular-nums;
+        z-index: 20;
+      }
       #hint kbd {
         background: rgba(255, 255, 255, 0.18);
         padding: 1px 6px;
@@ -138,6 +152,7 @@
   <body>
     <canvas id="game"></canvas>
     <div id="crosshair"></div>
+    <div id="fps">— FPS</div>
     <div id="hint">
       Move: <kbd>Z Q S D</kbd> / <kbd>W A S D</kbd> / arrows &nbsp;·&nbsp;
       Jump: <kbd>Space</kbd> &nbsp;·&nbsp;

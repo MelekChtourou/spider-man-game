@@ -7,52 +7,41 @@ import {
   Vector3,
 } from "@babylonjs/core";
 import type { Scene } from "@babylonjs/core";
+import type { BuildingSource } from "./assets";
 
-const GRID = 12;        // 12 x 12 = 144 buildings
-const CELL = 18;        // distance between building centers
-const BUILDING_W = 12;  // building footprint width/depth
-const MIN_H = 15;
-const MAX_H = 65;
-const GROUND_SIZE = 400;
+const GRID = 12; // 12 x 12 = 144 building cells (center skipped → 143)
+const CELL = 32; // distance between building centers — wide streets for swinging
+const FOOTPRINT_TARGET = 14; // building base width — leaves ~18u of road in each cell
+const HEIGHT_MIN = 25; // shortest building (world units)
+const HEIGHT_MAX = 70; // tallest skyscraper — taller arc for swing-jumps
+const GROUND_SIZE = 500; // accommodates the larger 12×32 = 384u city span
 
-export function createCity(scene: Scene): void {
+export function createCity(scene: Scene, sources: BuildingSource[]): void {
   // ---- Ground ----
   const ground = MeshBuilder.CreateGround(
     "ground",
     { width: GROUND_SIZE, height: GROUND_SIZE },
     scene,
   );
+  // Stylized dark asphalt using StandardMaterial: PBR on a flat plane gets
+  // washed out by the bright HDRI ambient and merges with the sky. Standard
+  // ignores the environment texture, so the dark color lands faithfully and
+  // the ground reads as a distinct surface. We lock specular off (matte) and
+  // freeze the material so per-frame uniform uploads are skipped.
   const groundMat = new StandardMaterial("groundMat", scene);
-  groundMat.diffuseColor = new Color3(0.16, 0.16, 0.18);
+  groundMat.diffuseColor = new Color3(0.18, 0.19, 0.22);
   groundMat.specularColor = Color3.Black();
+  groundMat.freeze();
   ground.material = groundMat;
   ground.metadata = { kind: "ground" };
   new PhysicsAggregate(ground, PhysicsShapeType.BOX, { mass: 0 }, scene);
 
-  // ---- Buildings: one source mesh + one shared material + N instances ----
-  // Before this commit each building had its own Mesh and StandardMaterial,
-  // which meant ~144 draw calls and 144 unique GPU programs. Instancing
-  // collapses rendering to a single draw call (or a couple, after culling
-  // partitions) by reusing one VBO with per-instance world matrices.
-  const sharedMat = new StandardMaterial("buildingMat", scene);
-  sharedMat.diffuseColor = new Color3(0.45, 0.45, 0.48);
-  sharedMat.specularColor = Color3.Black();
-  // Lock the material once so Babylon can skip re-uploading uniforms per
-  // draw — small but real win on mobile GPUs.
-  sharedMat.freeze();
-
-  const source = MeshBuilder.CreateBox(
-    "buildingSource",
-    { width: 1, height: 1, depth: 1 },
-    scene,
-  );
-  source.material = sharedMat;
-  source.metadata = { kind: "building" };
-  // The source itself is invisible — only its instances render. We can't
-  // simply hide it (would hide all instances too); placing it far below the
-  // map keeps it out of frame without that side-effect.
-  source.position.y = -10000;
-
+  // ---- Buildings ----
+  // For each cell we pick a random source mesh, instance it (one draw call
+  // per source variant total, regardless of instance count), give it a
+  // random Y rotation in 90° steps to add variety without breaking the box
+  // physics colliders, and attach a BOX aggregate sized to the *scaled*
+  // bounds of that instance.
   const origin = -((GRID - 1) * CELL) / 2;
 
   for (let i = 0; i < GRID; i++) {
@@ -62,16 +51,56 @@ export function createCity(scene: Scene): void {
 
       const x = origin + i * CELL;
       const z = origin + j * CELL;
-      const height = MIN_H + Math.random() * (MAX_H - MIN_H);
 
-      const inst = source.createInstance(`b_${i}_${j}`);
-      inst.position = new Vector3(x, height / 2, z);
-      inst.scaling = new Vector3(BUILDING_W, height, BUILDING_W);
-      inst.metadata = { kind: "building" };
+      const source = sources[Math.floor(Math.random() * sources.length)];
 
-      // Static physics body. The aggregate reads the instance's scaled
-      // bounds, so each building gets a correctly-sized box collider.
-      new PhysicsAggregate(inst, PhysicsShapeType.BOX, { mass: 0 }, scene);
+      // Compute per-instance scaling so the building lands in the target
+      // size range regardless of the source mesh's natural dimensions.
+      // X/Z stretch the natural footprint to FOOTPRINT_TARGET; Y stretches
+      // the natural height to a random target in [HEIGHT_MIN, HEIGHT_MAX].
+      const sourceMaxFootprint = Math.max(
+        2 * source.halfExtentX,
+        2 * source.halfExtentZ,
+      );
+      const footprintScale = FOOTPRINT_TARGET / sourceMaxFootprint;
+      const targetHeight = HEIGHT_MIN + Math.random() * (HEIGHT_MAX - HEIGHT_MIN);
+      const yScale = targetHeight / source.height;
+
+      const inst = source.mesh.createInstance(`b_${i}_${j}`);
+      // Random 90° Y-rotation keeps the box collider axis-aligned with
+      // the rotated mesh, so the collider still matches the visible shape.
+      const yRot = Math.floor(Math.random() * 4) * (Math.PI / 2);
+      inst.rotation = new Vector3(0, yRot, 0);
+      inst.scaling = new Vector3(footprintScale, yScale, footprintScale);
+      // Position the instance with its base at y=0 (Kenney buildings are
+      // authored with their base near origin, so this lands them on the
+      // ground plane).
+      inst.position = new Vector3(x, 0, z);
+      // Visual instances skip picking — the simpler physics-box proxy below
+      // handles raycast targeting, which is faster than triangle-picking the
+      // detailed glTF geometry.
+      inst.isPickable = false;
+
+      // Physics: a static box collider sized to the scaled bounds. The X/Z
+      // half-extents swap when rotation is 90°/270°, so we pass the actual
+      // post-rotation bounds.
+      const rotSwapXZ = yRot === Math.PI / 2 || yRot === (3 * Math.PI) / 2;
+      const halfX = source.halfExtentX * footprintScale;
+      const halfZ = source.halfExtentZ * footprintScale;
+      const physMesh = MeshBuilder.CreateBox(
+        `bPhys_${i}_${j}`,
+        {
+          width: (rotSwapXZ ? halfZ : halfX) * 2,
+          height: targetHeight,
+          depth: (rotSwapXZ ? halfX : halfZ) * 2,
+        },
+        scene,
+      );
+      physMesh.position = new Vector3(x, targetHeight / 2, z);
+      physMesh.isVisible = false;
+      physMesh.isPickable = true; // swing raycast picks the collider proxy
+      physMesh.metadata = { kind: "building" };
+      new PhysicsAggregate(physMesh, PhysicsShapeType.BOX, { mass: 0 }, scene);
     }
   }
 }

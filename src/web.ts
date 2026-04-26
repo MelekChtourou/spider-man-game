@@ -5,11 +5,11 @@ import {
   PhysicsAggregate,
   PhysicsShapeType,
   Ray,
+  StandardMaterial,
   Vector3,
 } from "@babylonjs/core";
 import type {
   ArcRotateCamera,
-  LinesMesh,
   Mesh,
   Scene,
 } from "@babylonjs/core";
@@ -18,6 +18,14 @@ import { vibrate } from "./platform";
 
 const MAX_RANGE = 200;     // how far each hand reaches for an anchor (m)
 const ROPE_SLACK = 0.95;   // attach slightly tighter than current distance for a "yank" feel
+
+// Release-jump: pressing Space while swinging detaches the rope and adds a
+// boost to the *current* velocity. The swing's momentum carries you horizontally
+// (Havok preserves it on detach), and the boost adds a strong upward kick + a
+// horizontal multiplier so a well-timed release at the bottom of the arc feels
+// like a launch — Spider-Man's signature "fling" mechanic.
+const RELEASE_VERTICAL_BOOST = 11;   // m/s upward at release (≈ 6m peak)
+const RELEASE_HORIZONTAL_GAIN = 1.5; // multiply current horizontal velocity by this
 
 // Direction-cone weights for the per-hand raycast. These shape *where* each
 // hand looks for an anchor:
@@ -38,7 +46,50 @@ export function createWebSwing(
   let constraint: DistanceConstraint | null = null;
   let anchorMesh: Mesh | null = null;
   let anchorAggregate: PhysicsAggregate | null = null;
-  let line: LinesMesh | null = null;
+  let line: Mesh | null = null;
+
+  // Shared material for the web tube — bright white emissive so it reads
+  // against both bright sky and dark buildings without depending on lights.
+  const webMat = new StandardMaterial("webMat", scene);
+  webMat.diffuseColor = Color3.White();
+  webMat.emissiveColor = new Color3(0.9, 0.9, 0.95);
+  webMat.specularColor = Color3.Black();
+  webMat.freeze();
+
+  // OIIA-OIIA cat soundtrack via plain HTMLAudioElement. Babylon 9's audio
+  // engine is opt-in and ships uninitialized by default, so we sidestep it
+  // entirely. We play the first 2 seconds (≈ "o-i-i-a-i"), and a setTimeout
+  // re-rewinds + replays while the rope is still attached.
+  const OIIA_CHUNK_MS = 2000;
+  const oiiaAudio = new Audio("/assets/oiia-oiia-sound.mp3");
+  oiiaAudio.preload = "auto";
+  oiiaAudio.volume = 0.8;
+  let oiiaLoopTimer: number | null = null;
+  function startOiia(): void {
+    if (oiiaLoopTimer !== null) clearTimeout(oiiaLoopTimer);
+    oiiaAudio.currentTime = 0;
+    // play() returns a Promise that rejects if autoplay is blocked. We
+    // swallow the rejection — the user gesture (J/L key) almost always
+    // unblocks audio, but if it doesn't on some browser, we fail silently.
+    void oiiaAudio.play().catch(() => {});
+    oiiaLoopTimer = window.setTimeout(function tick() {
+      if (player.state.swinging) {
+        oiiaAudio.currentTime = 0;
+        void oiiaAudio.play().catch(() => {});
+        oiiaLoopTimer = window.setTimeout(tick, OIIA_CHUNK_MS);
+      } else {
+        oiiaLoopTimer = null;
+      }
+    }, OIIA_CHUNK_MS);
+  }
+  function stopOiia(): void {
+    if (oiiaLoopTimer !== null) {
+      clearTimeout(oiiaLoopTimer);
+      oiiaLoopTimer = null;
+    }
+    oiiaAudio.pause();
+    oiiaAudio.currentTime = 0;
+  }
 
   function rayDirForHand(hand: Hand): Vector3 {
     let forward = camera.getForwardRay().direction.clone();
@@ -100,6 +151,9 @@ export function createWebSwing(
     // Sharp tactile "thwip" — the rope catching is the most satisfying
     // moment of the swing loop, so we give it the strongest haptic cue.
     vibrate(20);
+    // Restart the OIIA chunk from the beginning — every swing-start should
+    // hit "o-i-i-a-i" cleanly from the top, not resume mid-syllable.
+    startOiia();
   }
 
   function endSwing(): void {
@@ -121,6 +175,8 @@ export function createWebSwing(
     }
     activeHand = null;
     player.state.swinging = false;
+    // Cut the music when the rope detaches.
+    stopOiia();
   }
 
   // ---- Keyboard: J = left hand, L = right hand. Bound by physical position ----
@@ -129,6 +185,25 @@ export function createWebSwing(
     if (e.repeat) return;
     if (e.code === "KeyJ") startSwing("left");
     else if (e.code === "KeyL") startSwing("right");
+    else if (e.code === "Space" && activeHand !== null) {
+      // Mid-swing Space → release with momentum boost.
+      const v = player.aggregate.body.getLinearVelocity();
+      endSwing();
+      player.aggregate.body.setLinearVelocity(
+        new Vector3(
+          v.x * RELEASE_HORIZONTAL_GAIN,
+          v.y + RELEASE_VERTICAL_BOOST,
+          v.z * RELEASE_HORIZONTAL_GAIN,
+        ),
+      );
+      // Consume the Space press in player.ts's input set so its universal
+      // jump handler doesn't also fire on this same press — that was both
+      // overriding the release boost AND eating a double-jump charge.
+      player.consumeKey("Space");
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      vibrate(15);
+    }
   };
   const onKeyUp = (e: KeyboardEvent) => {
     if (e.code === "KeyJ" && activeHand === "left") endSwing();
@@ -137,19 +212,25 @@ export function createWebSwing(
   window.addEventListener("keydown", onKeyDown);
   window.addEventListener("keyup", onKeyUp);
 
-  // ---- Visual: draw a line from the player to the anchor each frame ----
+  // ---- Visual: draw a tube from the player to the anchor each frame ----
   scene.onBeforeRenderObservable.add(() => {
     if (constraint && anchorMesh) {
-      const points = [
+      const path = [
         player.mesh.position.clone(),
         anchorMesh.position.clone(),
       ];
-      line = MeshBuilder.CreateLines(
+      line = MeshBuilder.CreateTube(
         "web",
-        { points, updatable: true, instance: line ?? undefined },
+        {
+          path,
+          radius: 0.04,
+          tessellation: 6, // hex tube — cheap, looks fine
+          updatable: true,
+          instance: line ?? undefined,
+        },
         scene,
       );
-      line.color = new Color3(1, 1, 1);
+      if (!line.material) line.material = webMat;
       line.isPickable = false;
     } else if (line) {
       line.dispose();
